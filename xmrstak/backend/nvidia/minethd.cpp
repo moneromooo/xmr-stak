@@ -242,6 +242,7 @@ void minethd::work_main()
 				std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
 			consume_work();
+			ctx.variant = mineMonero && oWork.bWorkBlob[0] >= 7 ? oWork.bWorkBlob[0] - 6 : 0;
 			continue;
 		}
 
@@ -282,9 +283,10 @@ void minethd::work_main()
 				memset(bResult, 0, sizeof(job_result::bResult));
 
 				*(uint32_t*)(bWorkBlob + 39) = foundNonce[i];
+				cpu_ctx->variant = mineMonero && oWork.bWorkBlob[0] >= 7 ? oWork.bWorkBlob[0] - 6 : 0;
 
 				hash_fun(bWorkBlob, oWork.iWorkSize, bResult, cpu_ctx);
-				if ( (*((uint64_t*)(bResult + 24))) < oWork.iTarget)
+				if ((*((uint64_t*)(bResult + 24))) < oWork.iTarget)
 					executor::inst()->push_event(ex_event(job_result(oWork.sJobID, foundNonce[i], bResult, iThreadNo), oWork.iPoolId));
 				else
 					executor::inst()->push_event(ex_event("NVIDIA Invalid Result", oWork.iPoolId));
@@ -301,6 +303,7 @@ void minethd::work_main()
 		}
 
 		consume_work();
+		ctx.variant = mineMonero && oWork.bWorkBlob[0] >= 7 ? oWork.bWorkBlob[0] - 6 : 0;
 	}
 }
 

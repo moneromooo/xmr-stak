@@ -38,6 +38,19 @@ static inline uint64_t _umul128(uint64_t a, uint64_t b, uint64_t* hi)
 
 #include "soft_aes.hpp"
 
+#define VARIANT1_1(p, variant) \
+  do if (variant > 0) \
+  { \
+    uint8_t tmp = ((const uint8_t*)p)[11]; \
+    uint8_t tmp1 = (tmp>>4)&1, tmp2 = (tmp>>5)&1, tmp3 = tmp1^tmp2; \
+    uint8_t tmp0 = nonce_flag ? tmp3 : tmp1 + 1; \
+    ((uint8_t*)p)[11] = (tmp & 0xef) | (tmp0<<4); \
+  } while(0)
+
+#define VARIANT1_2(p, variant) VARIANT1_1(p, variant)
+#define VARIANT1_INIT(ctx) \
+  const uint8_t nonce_flag = (ctx)[0]->variant > 0 ? ((const uint8_t*)input)[39] & 0x01 : 0
+
 extern "C"
 {
 	void keccak(const uint8_t *in, int inlen, uint8_t *md, int mdlen);
@@ -292,6 +305,8 @@ void cryptonight_hash(const void* input, size_t len, void* output, cryptonight_c
 {
 	keccak((const uint8_t *)input, len, ctx0->hash_state, 200);
 
+	VARIANT1_INIT(&ctx0);
+
 	// Optim - 99% time boundary
 	cn_explode_scratchpad<MEM, SOFT_AES, PREFETCH>((__m128i*)ctx0->hash_state, (__m128i*)ctx0->long_state);
 
@@ -316,6 +331,7 @@ void cryptonight_hash(const void* input, size_t len, void* output, cryptonight_c
 			cx = _mm_aesenc_si128(cx, _mm_set_epi64x(ah0, al0));
 
 		_mm_store_si128((__m128i *)&l0[idx0 & MASK], _mm_xor_si128(bx0, cx));
+		VARIANT1_1(&l0[idx0 & MASK], ctx0->variant);
 		idx0 = _mm_cvtsi128_si64(cx);
 		bx0 = cx;
 
@@ -332,6 +348,7 @@ void cryptonight_hash(const void* input, size_t len, void* output, cryptonight_c
 		ah0 += lo;
 		((uint64_t*)&l0[idx0 & MASK])[0] = al0;
 		((uint64_t*)&l0[idx0 & MASK])[1] = ah0;
+		VARIANT1_2(&l0[idx0 & MASK], ctx0->variant);
 		ah0 ^= ch;
 		al0 ^= cl;
 		idx0 = al0;
@@ -357,6 +374,8 @@ void cryptonight_double_hash(const void* input, size_t len, void* output, crypto
 {
 	keccak((const uint8_t *)input, len, ctx[0]->hash_state, 200);
 	keccak((const uint8_t *)input+len, len, ctx[1]->hash_state, 200);
+
+	VARIANT1_INIT(ctx);
 
 	// Optim - 99% time boundary
 	cn_explode_scratchpad<MEM, SOFT_AES, PREFETCH>((__m128i*)ctx[0]->hash_state, (__m128i*)ctx[0]->long_state);
@@ -389,6 +408,7 @@ void cryptonight_double_hash(const void* input, size_t len, void* output, crypto
 			cx = _mm_aesenc_si128(cx, _mm_set_epi64x(axh0, axl0));
 
 		_mm_store_si128((__m128i *)&l0[idx0 & MASK], _mm_xor_si128(bx0, cx));
+		VARIANT1_1(&l0[idx0 & MASK], ctx[0]->variant);
 		idx0 = _mm_cvtsi128_si64(cx);
 		bx0 = cx;
 
@@ -403,6 +423,7 @@ void cryptonight_double_hash(const void* input, size_t len, void* output, crypto
 			cx = _mm_aesenc_si128(cx, _mm_set_epi64x(axh1, axl1));
 
 		_mm_store_si128((__m128i *)&l1[idx1 & MASK], _mm_xor_si128(bx1, cx));
+		VARIANT1_1(&l1[idx1 & MASK], ctx[1]->variant);
 		idx1 = _mm_cvtsi128_si64(cx);
 		bx1 = cx;
 
@@ -419,6 +440,7 @@ void cryptonight_double_hash(const void* input, size_t len, void* output, crypto
 		axh0 += lo;
 		((uint64_t*)&l0[idx0 & MASK])[0] = axl0;
 		((uint64_t*)&l0[idx0 & MASK])[1] = axh0;
+		VARIANT1_2(&l0[idx0 & MASK], ctx[0]->variant);
 		axh0 ^= ch;
 		axl0 ^= cl;
 		idx0 = axl0;
@@ -435,6 +457,7 @@ void cryptonight_double_hash(const void* input, size_t len, void* output, crypto
 		axh1 += lo;
 		((uint64_t*)&l1[idx1 & MASK])[0] = axl1;
 		((uint64_t*)&l1[idx1 & MASK])[1] = axh1;
+		VARIANT1_2(&l1[idx1 & MASK], ctx[1]->variant);
 		axh1 ^= ch;
 		axl1 ^= cl;
 		idx1 = axl1;
@@ -463,13 +486,14 @@ void cryptonight_double_hash(const void* input, size_t len, void* output, crypto
 		_mm_prefetch((const char*)ptr, _MM_HINT_T0);	\
 	c = _mm_load_si128(ptr)
 
-#define CN_STEP2(a, b, c, l, ptr, idx)				\
+#define CN_STEP2(a, b, c, l, ptr, idx, variant)			\
 	if(SOFT_AES)						\
 		c = soft_aesenc(c, a);				\
 	else							\
 		c = _mm_aesenc_si128(c, a);			\
 	b = _mm_xor_si128(b, c);				\
-	_mm_store_si128(ptr, b)
+       _mm_store_si128(ptr, b);					\
+	VARIANT1_1(ptr, variant)
 
 #define CN_STEP3(a, b, c, l, ptr, idx)				\
 	idx = _mm_cvtsi128_si64(c);				\
@@ -478,15 +502,17 @@ void cryptonight_double_hash(const void* input, size_t len, void* output, crypto
 		_mm_prefetch((const char*)ptr, _MM_HINT_T0);	\
 	b = _mm_load_si128(ptr)
 
-#define CN_STEP4(a, b, c, l, ptr, idx)				\
+#define CN_STEP4(a, b, c, l, ptr, idx, variant)			\
 	lo = _umul128(idx, _mm_cvtsi128_si64(b), &hi);		\
 	a = _mm_add_epi64(a, _mm_set_epi64x(lo, hi));		\
-	_mm_store_si128(ptr, a)
+       _mm_store_si128(ptr, a);					\
+	VARIANT1_2(ptr, variant)
 
 // This lovelier creation will do 3 cn hashes at a time.
 template<size_t MASK, size_t ITERATIONS, size_t MEM, bool SOFT_AES, bool PREFETCH>
 void cryptonight_triple_hash(const void* input, size_t len, void* output, cryptonight_ctx** ctx)
 {
+	VARIANT1_INIT(ctx);
 	for (size_t i = 0; i < 3; i++)
 	{
 		keccak((const uint8_t *)input + len * i, len, ctx[i]->hash_state, 200);
@@ -520,34 +546,34 @@ void cryptonight_triple_hash(const void* input, size_t len, void* output, crypto
 		CN_STEP1(ax1, bx1, cx1, l1, ptr1, idx1);
 		CN_STEP1(ax2, bx2, cx2, l2, ptr2, idx2);
 
-		CN_STEP2(ax0, bx0, cx0, l0, ptr0, idx0);
-		CN_STEP2(ax1, bx1, cx1, l1, ptr1, idx1);
-		CN_STEP2(ax2, bx2, cx2, l2, ptr2, idx2);
+               CN_STEP2(ax0, bx0, cx0, l0, ptr0, idx0, ctx[0]->variant);
+               CN_STEP2(ax1, bx1, cx1, l1, ptr1, idx1, ctx[1]->variant);
+               CN_STEP2(ax2, bx2, cx2, l2, ptr2, idx2, ctx[2]->variant);
 
 		CN_STEP3(ax0, bx0, cx0, l0, ptr0, idx0);
 		CN_STEP3(ax1, bx1, cx1, l1, ptr1, idx1);
 		CN_STEP3(ax2, bx2, cx2, l2, ptr2, idx2);
 
-		CN_STEP4(ax0, bx0, cx0, l0, ptr0, idx0);
-		CN_STEP4(ax1, bx1, cx1, l1, ptr1, idx1);
-		CN_STEP4(ax2, bx2, cx2, l2, ptr2, idx2);
+               CN_STEP4(ax0, bx0, cx0, l0, ptr0, idx0, ctx[0]->variant);
+               CN_STEP4(ax1, bx1, cx1, l1, ptr1, idx1, ctx[1]->variant);
+               CN_STEP4(ax2, bx2, cx2, l2, ptr2, idx2, ctx[2]->variant);
 
 		// ODD ROUND
 		CN_STEP1(ax0, cx0, bx0, l0, ptr0, idx0);
 		CN_STEP1(ax1, cx1, bx1, l1, ptr1, idx1);
 		CN_STEP1(ax2, cx2, bx2, l2, ptr2, idx2);
 
-		CN_STEP2(ax0, cx0, bx0, l0, ptr0, idx0);
-		CN_STEP2(ax1, cx1, bx1, l1, ptr1, idx1);
-		CN_STEP2(ax2, cx2, bx2, l2, ptr2, idx2);
+               CN_STEP2(ax0, cx0, bx0, l0, ptr0, idx0, ctx[0]->variant);
+               CN_STEP2(ax1, cx1, bx1, l1, ptr1, idx1, ctx[1]->variant);
+               CN_STEP2(ax2, cx2, bx2, l2, ptr2, idx2, ctx[2]->variant);
 
 		CN_STEP3(ax0, cx0, bx0, l0, ptr0, idx0);
 		CN_STEP3(ax1, cx1, bx1, l1, ptr1, idx1);
 		CN_STEP3(ax2, cx2, bx2, l2, ptr2, idx2);
 
-		CN_STEP4(ax0, cx0, bx0, l0, ptr0, idx0);
-		CN_STEP4(ax1, cx1, bx1, l1, ptr1, idx1);
-		CN_STEP4(ax2, cx2, bx2, l2, ptr2, idx2);
+               CN_STEP4(ax0, cx0, bx0, l0, ptr0, idx0, ctx[0]->variant);
+               CN_STEP4(ax1, cx1, bx1, l1, ptr1, idx1, ctx[1]->variant);
+               CN_STEP4(ax2, cx2, bx2, l2, ptr2, idx2, ctx[2]->variant);
 	}
 
 	for (size_t i = 0; i < 3; i++)
@@ -562,6 +588,7 @@ void cryptonight_triple_hash(const void* input, size_t len, void* output, crypto
 template<size_t MASK, size_t ITERATIONS, size_t MEM, bool SOFT_AES, bool PREFETCH>
 void cryptonight_quad_hash(const void* input, size_t len, void* output, cryptonight_ctx** ctx)
 {
+	VARIANT1_INIT(ctx);
 	for (size_t i = 0; i < 4; i++)
 	{
 		keccak((const uint8_t *)input + len * i, len, ctx[i]->hash_state, 200);
@@ -601,20 +628,20 @@ void cryptonight_quad_hash(const void* input, size_t len, void* output, cryptoni
 		CN_STEP1(ax2, bx2, cx2, l2, ptr2, idx2);
 		CN_STEP1(ax3, bx3, cx3, l3, ptr3, idx3);
 
-		CN_STEP2(ax0, bx0, cx0, l0, ptr0, idx0);
-		CN_STEP2(ax1, bx1, cx1, l1, ptr1, idx1);
-		CN_STEP2(ax2, bx2, cx2, l2, ptr2, idx2);
-		CN_STEP2(ax3, bx3, cx3, l3, ptr3, idx3);
+               CN_STEP2(ax0, bx0, cx0, l0, ptr0, idx0, ctx[0]->variant);
+               CN_STEP2(ax1, bx1, cx1, l1, ptr1, idx1, ctx[1]->variant);
+               CN_STEP2(ax2, bx2, cx2, l2, ptr2, idx2, ctx[2]->variant);
+               CN_STEP2(ax3, bx3, cx3, l3, ptr3, idx3, ctx[3]->variant);
 
 		CN_STEP3(ax0, bx0, cx0, l0, ptr0, idx0);
 		CN_STEP3(ax1, bx1, cx1, l1, ptr1, idx1);
 		CN_STEP3(ax2, bx2, cx2, l2, ptr2, idx2);
 		CN_STEP3(ax3, bx3, cx3, l3, ptr3, idx3);
 
-		CN_STEP4(ax0, bx0, cx0, l0, ptr0, idx0);
-		CN_STEP4(ax1, bx1, cx1, l1, ptr1, idx1);
-		CN_STEP4(ax2, bx2, cx2, l2, ptr2, idx2);
-		CN_STEP4(ax3, bx3, cx3, l3, ptr3, idx3);
+               CN_STEP4(ax0, bx0, cx0, l0, ptr0, idx0, ctx[0]->variant);
+               CN_STEP4(ax1, bx1, cx1, l1, ptr1, idx1, ctx[1]->variant);
+               CN_STEP4(ax2, bx2, cx2, l2, ptr2, idx2, ctx[2]->variant);
+               CN_STEP4(ax3, bx3, cx3, l3, ptr3, idx3, ctx[3]->variant);
 
 		// ODD ROUND
 		CN_STEP1(ax0, cx0, bx0, l0, ptr0, idx0);
@@ -622,20 +649,20 @@ void cryptonight_quad_hash(const void* input, size_t len, void* output, cryptoni
 		CN_STEP1(ax2, cx2, bx2, l2, ptr2, idx2);
 		CN_STEP1(ax3, cx3, bx3, l3, ptr3, idx3);
 
-		CN_STEP2(ax0, cx0, bx0, l0, ptr0, idx0);
-		CN_STEP2(ax1, cx1, bx1, l1, ptr1, idx1);
-		CN_STEP2(ax2, cx2, bx2, l2, ptr2, idx2);
-		CN_STEP2(ax3, cx3, bx3, l3, ptr3, idx3);
+               CN_STEP2(ax0, cx0, bx0, l0, ptr0, idx0, ctx[0]->variant);
+               CN_STEP2(ax1, cx1, bx1, l1, ptr1, idx1, ctx[1]->variant);
+               CN_STEP2(ax2, cx2, bx2, l2, ptr2, idx2, ctx[2]->variant);
+               CN_STEP2(ax3, cx3, bx3, l3, ptr3, idx3, ctx[3]->variant);
 
 		CN_STEP3(ax0, cx0, bx0, l0, ptr0, idx0);
 		CN_STEP3(ax1, cx1, bx1, l1, ptr1, idx1);
 		CN_STEP3(ax2, cx2, bx2, l2, ptr2, idx2);
 		CN_STEP3(ax3, cx3, bx3, l3, ptr3, idx3);
 
-		CN_STEP4(ax0, cx0, bx0, l0, ptr0, idx0);
-		CN_STEP4(ax1, cx1, bx1, l1, ptr1, idx1);
-		CN_STEP4(ax2, cx2, bx2, l2, ptr2, idx2);
-		CN_STEP4(ax3, cx3, bx3, l3, ptr3, idx3);
+               CN_STEP4(ax0, cx0, bx0, l0, ptr0, idx0, ctx[0]->variant);
+               CN_STEP4(ax1, cx1, bx1, l1, ptr1, idx1, ctx[1]->variant);
+               CN_STEP4(ax2, cx2, bx2, l2, ptr2, idx2, ctx[2]->variant);
+               CN_STEP4(ax3, cx3, bx3, l3, ptr3, idx3, ctx[3]->variant);
 	}
 
 	for (size_t i = 0; i < 4; i++)
@@ -650,6 +677,7 @@ void cryptonight_quad_hash(const void* input, size_t len, void* output, cryptoni
 template<size_t MASK, size_t ITERATIONS, size_t MEM, bool SOFT_AES, bool PREFETCH>
 void cryptonight_penta_hash(const void* input, size_t len, void* output, cryptonight_ctx** ctx)
 {
+	VARIANT1_INIT(ctx);
 	for (size_t i = 0; i < 5; i++)
 	{
 		keccak((const uint8_t *)input + len * i, len, ctx[i]->hash_state, 200);
@@ -695,11 +723,11 @@ void cryptonight_penta_hash(const void* input, size_t len, void* output, crypton
 		CN_STEP1(ax3, bx3, cx3, l3, ptr3, idx3);
 		CN_STEP1(ax4, bx4, cx4, l4, ptr4, idx4);
 
-		CN_STEP2(ax0, bx0, cx0, l0, ptr0, idx0);
-		CN_STEP2(ax1, bx1, cx1, l1, ptr1, idx1);
-		CN_STEP2(ax2, bx2, cx2, l2, ptr2, idx2);
-		CN_STEP2(ax3, bx3, cx3, l3, ptr3, idx3);
-		CN_STEP2(ax4, bx4, cx4, l4, ptr4, idx4);
+               CN_STEP2(ax0, bx0, cx0, l0, ptr0, idx0, ctx[0]->variant);
+               CN_STEP2(ax1, bx1, cx1, l1, ptr1, idx1, ctx[1]->variant);
+               CN_STEP2(ax2, bx2, cx2, l2, ptr2, idx2, ctx[2]->variant);
+               CN_STEP2(ax3, bx3, cx3, l3, ptr3, idx3, ctx[3]->variant);
+               CN_STEP2(ax4, bx4, cx4, l4, ptr4, idx4, ctx[4]->variant);
 
 		CN_STEP3(ax0, bx0, cx0, l0, ptr0, idx0);
 		CN_STEP3(ax1, bx1, cx1, l1, ptr1, idx1);
@@ -707,11 +735,11 @@ void cryptonight_penta_hash(const void* input, size_t len, void* output, crypton
 		CN_STEP3(ax3, bx3, cx3, l3, ptr3, idx3);
 		CN_STEP3(ax4, bx4, cx4, l4, ptr4, idx4);
 
-		CN_STEP4(ax0, bx0, cx0, l0, ptr0, idx0);
-		CN_STEP4(ax1, bx1, cx1, l1, ptr1, idx1);
-		CN_STEP4(ax2, bx2, cx2, l2, ptr2, idx2);
-		CN_STEP4(ax3, bx3, cx3, l3, ptr3, idx3);
-		CN_STEP4(ax4, bx4, cx4, l4, ptr4, idx4);
+               CN_STEP4(ax0, bx0, cx0, l0, ptr0, idx0, ctx[0]->variant);
+               CN_STEP4(ax1, bx1, cx1, l1, ptr1, idx1, ctx[1]->variant);
+               CN_STEP4(ax2, bx2, cx2, l2, ptr2, idx2, ctx[2]->variant);
+               CN_STEP4(ax3, bx3, cx3, l3, ptr3, idx3, ctx[3]->variant);
+               CN_STEP4(ax4, bx4, cx4, l4, ptr4, idx4, ctx[4]->variant);
 
 		// ODD ROUND
 		CN_STEP1(ax0, cx0, bx0, l0, ptr0, idx0);
@@ -720,11 +748,11 @@ void cryptonight_penta_hash(const void* input, size_t len, void* output, crypton
 		CN_STEP1(ax3, cx3, bx3, l3, ptr3, idx3);
 		CN_STEP1(ax4, cx4, bx4, l4, ptr4, idx4);
 
-		CN_STEP2(ax0, cx0, bx0, l0, ptr0, idx0);
-		CN_STEP2(ax1, cx1, bx1, l1, ptr1, idx1);
-		CN_STEP2(ax2, cx2, bx2, l2, ptr2, idx2);
-		CN_STEP2(ax3, cx3, bx3, l3, ptr3, idx3);
-		CN_STEP2(ax4, cx4, bx4, l4, ptr4, idx4);
+               CN_STEP2(ax0, cx0, bx0, l0, ptr0, idx0, ctx[0]->variant);
+               CN_STEP2(ax1, cx1, bx1, l1, ptr1, idx1, ctx[1]->variant);
+               CN_STEP2(ax2, cx2, bx2, l2, ptr2, idx2, ctx[2]->variant);
+               CN_STEP2(ax3, cx3, bx3, l3, ptr3, idx3, ctx[3]->variant);
+               CN_STEP2(ax4, cx4, bx4, l4, ptr4, idx4, ctx[4]->variant);
 
 		CN_STEP3(ax0, cx0, bx0, l0, ptr0, idx0);
 		CN_STEP3(ax1, cx1, bx1, l1, ptr1, idx1);
@@ -732,11 +760,11 @@ void cryptonight_penta_hash(const void* input, size_t len, void* output, crypton
 		CN_STEP3(ax3, cx3, bx3, l3, ptr3, idx3);
 		CN_STEP3(ax4, cx4, bx4, l4, ptr4, idx4);
 
-		CN_STEP4(ax0, cx0, bx0, l0, ptr0, idx0);
-		CN_STEP4(ax1, cx1, bx1, l1, ptr1, idx1);
-		CN_STEP4(ax2, cx2, bx2, l2, ptr2, idx2);
-		CN_STEP4(ax3, cx3, bx3, l3, ptr3, idx3);
-		CN_STEP4(ax4, cx4, bx4, l4, ptr4, idx4);
+               CN_STEP4(ax0, cx0, bx0, l0, ptr0, idx0, ctx[0]->variant);
+               CN_STEP4(ax1, cx1, bx1, l1, ptr1, idx1, ctx[1]->variant);
+               CN_STEP4(ax2, cx2, bx2, l2, ptr2, idx2, ctx[2]->variant);
+               CN_STEP4(ax3, cx3, bx3, l3, ptr3, idx3, ctx[3]->variant);
+               CN_STEP4(ax4, cx4, bx4, l4, ptr4, idx4, ctx[4]->variant);
 	}
 
 	for (size_t i = 0; i < 5; i++)
